@@ -19,6 +19,20 @@ def safe_filename(s: str) -> str:
     return s or "nev_nelkul"
 
 
+def is_streamlit_cloud() -> bool:
+    # Streamlit Cloudon tipikusan be van állítva a HOSTNAME / STREAMLIT_*
+    # Nem 100% garantált, de jó közelítés.
+    import os
+    host = (os.environ.get("HOSTNAME") or "").lower()
+    return host.endswith("streamlit") or "streamlit" in host or os.environ.get("STREAMLIT_SHARING") is not None
+
+
+def build_color_map(period_order: List[str]) -> dict:
+    # Fix, exportban is stabil színek
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
+    return {p: palette[i % len(palette)] for i, p in enumerate(period_order)}
+
+
 def read_two_periods(xlsx_bytes: bytes) -> Tuple[pd.DataFrame, Optional[pd.DataFrame], List[str], List[str]]:
     xls = pd.ExcelFile(io.BytesIO(xlsx_bytes))
     sheets = xls.sheet_names
@@ -85,7 +99,6 @@ def avg_view(long_df: pd.DataFrame, level: str) -> pd.DataFrame:
 
 
 def embed_footer_on_figure(fig, footer_text: str) -> None:
-    # Beégetett lábjegyzet exporthoz (SVG/PNG)
     fig.add_annotation(
         text=footer_text,
         x=0.5,
@@ -101,12 +114,15 @@ def embed_footer_on_figure(fig, footer_text: str) -> None:
 
 
 def make_bar_figure(data, area_order, period_order, title: str, embed_footer: bool = False):
+    color_map = build_color_map(period_order)
+
     fig = px.bar(
         data,
         x="Terület",
         y="Százalék",
         color="Időszak",
         category_orders={"Terület": area_order, "Időszak": period_order},
+        color_discrete_map=color_map,     # <- FIX színek
         barmode="group",
         range_y=[0, 110],
         labels={"Százalék": "Százalék (%)"},
@@ -135,12 +151,15 @@ def make_bar_figure(data, area_order, period_order, title: str, embed_footer: bo
 
 
 def make_radar_figure(data, area_order, period_order, title: str, embed_footer: bool = False):
+    color_map = build_color_map(period_order)
+
     fig = px.line_polar(
         data,
         r="Százalék",
         theta="Terület",
         color="Időszak",
         category_orders={"Terület": area_order, "Időszak": period_order},
+        color_discrete_map=color_map,     # <- FIX színek
         line_close=True,
         range_r=[0, 100],
         labels={"Százalék": "Százalék (%)"},
@@ -159,14 +178,9 @@ def make_radar_figure(data, area_order, period_order, title: str, embed_footer: 
 
 
 def figures_to_zip(fig_items, fmt: str, width: int = 1400, height: int = 950, scale: int = 2) -> bytes:
-    """
-    fmt: 'svg' vagy 'png'
-    SVG export Cloud-on általában működik Chrome nélkül.
-    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for fname, fig in fig_items:
-            # SVG-hez nem kell feltétlen méret, de adjuk meg egységesen
             img_bytes = fig.to_image(format=fmt, width=width, height=height, scale=scale)
             zf.writestr(fname, img_bytes)
     return buf.getvalue()
@@ -195,32 +209,28 @@ def main():
     area_order = areas[:]
     period_order = periods[:]
 
-    # Szűrők
     left, _ = st.columns([1, 2])
     with left:
-        view_mode = st.radio("Nézet", ["Egy tanuló", "Osztályátlag", "Összes átlag"], index=0, key="view_mode")
+        view_mode = st.radio("Nézet", ["Egy tanuló", "Osztályátlag", "Összes átlag"], index=0)
+
         classes = sorted([c for c in long_all["Osztály"].dropna().unique().tolist()])
-        selected_class = st.selectbox("Osztály szűrés", ["(mind)"] + classes, index=0, key="class_filter")
-        show_table = st.checkbox("Táblázat mutatása (%)", value=True, key="show_table")
+        selected_class = st.selectbox("Osztály szűrés", ["(mind)"] + classes, index=0)
+
+        show_table = st.checkbox("Táblázat mutatása (%)", value=True)
 
     filtered = long_all.copy()
     if selected_class != "(mind)":
         filtered = filtered[filtered["Osztály"] == selected_class]
 
-    # Nézet + cím
     if view_mode == "Egy tanuló":
         names = sorted(filtered["Név"].dropna().unique().tolist())
-        selected_name = st.selectbox("Tanuló", names, key="student_select")
+        selected_name = st.selectbox("Tanuló", names)
         data = filtered[filtered["Név"] == selected_name].copy()
         chart_title = f"Személyes és társas kompetencia : {selected_name}"
     elif view_mode == "Osztályátlag":
         data = avg_view(filtered, "Osztály")
         if selected_class == "(mind)":
-            cls = st.selectbox(
-                "Melyik osztály átlagát nézzük?",
-                sorted(data["Osztály"].unique().tolist()),
-                key="class_avg_pick",
-            )
+            cls = st.selectbox("Melyik osztály átlagát nézzük?", sorted(data["Osztály"].unique().tolist()))
             data = data[data["Osztály"] == cls].copy()
             chart_title = f"Személyes és társas kompetencia : {cls} átlag"
         else:
@@ -229,7 +239,6 @@ def main():
         data = avg_view(filtered, "Összes")
         chart_title = "Személyes és társas kompetencia : Átlag"
 
-    # Diagramok (képernyőn: lábjegyzet külön, hogy ne lógjon tengelybe)
     st.subheader("Területenkénti összehasonlítás (%)")
     st.plotly_chart(make_bar_figure(data, area_order, period_order, chart_title, embed_footer=False), use_container_width=True)
     st.caption(FOOTER_TEXT)
@@ -247,12 +256,13 @@ def main():
         )
         st.dataframe(pivot.style.format("{:.1f}%"), use_container_width=True)
 
-    # ---------------- ZIP EXPORT (SVG) ----------------
+    # -------- ZIP --------
     st.divider()
     st.subheader("Tömeges letöltés (ZIP)")
 
-    st.write("Streamlit Cloud-on a PNG export gyakran nem elérhető, ezért itt **SVG** exportot használunk.")
-    st.caption("SVG: kiváló minőség, nagyítható, Word/PowerPoint be tudja szúrni.")
+    cloud = is_streamlit_cloud()
+    if cloud:
+        st.info("Online (Streamlit Cloud) környezet: a PNG export nem elérhető. Itt SVG exportot használj.")
 
     export_scope = st.radio(
         "Mit csomagoljunk a ZIP-be?",
@@ -261,13 +271,18 @@ def main():
         key="zip_scope",
     )
 
-    export_format = st.radio(
-        "Export formátum",
-        ["SVG (ajánlott – Cloud kompatibilis)", "PNG (csak ha van Chrome a környezetben)"],
-        index=0,
-        key="zip_format",
-    )
-    fmt = "svg" if export_format.startswith("SVG") else "png"
+    # Cloudon csak SVG
+    if cloud:
+        fmt = "svg"
+        st.write("Export formátum: **SVG**")
+    else:
+        export_format = st.radio(
+            "Export formátum",
+            ["SVG", "PNG"],
+            index=0,
+            key="zip_format",
+        )
+        fmt = "svg" if export_format == "SVG" else "png"
 
     if export_scope == "Minden tanuló (minden osztály)":
         export_df = long_all
@@ -276,18 +291,16 @@ def main():
         export_df = filtered
         zip_name = f"diagramok_szurt_{fmt}.zip"
 
-    # session state init
     st.session_state.setdefault("zip_ready", False)
     st.session_state.setdefault("zip_bytes", b"")
     st.session_state.setdefault("zip_filename", zip_name)
 
-    # ha változott a zip név: reset
     if st.session_state["zip_filename"] != zip_name:
         st.session_state["zip_filename"] = zip_name
         st.session_state["zip_ready"] = False
         st.session_state["zip_bytes"] = b""
 
-    if st.button("ZIP elkészítése", type="primary", key="zip_make_btn"):
+    if st.button("ZIP elkészítése", type="primary"):
         st.session_state["zip_ready"] = False
         st.session_state["zip_bytes"] = b""
 
@@ -313,8 +326,6 @@ def main():
                     continue
 
                 title = f"Személyes és társas kompetencia : {nev}"
-
-                # Exportban: beégetett lábjegyzet
                 bar = make_bar_figure(one, area_order, period_order, title, embed_footer=True)
                 radar = make_radar_figure(one, area_order, period_order, title, embed_footer=True)
 
@@ -326,21 +337,16 @@ def main():
 
             status.write(f"Fájlok készítése és ZIP csomagolás ({fmt.upper()})…")
             zip_bytes = figures_to_zip(fig_items, fmt=fmt)
-
             st.session_state["zip_bytes"] = zip_bytes
             st.session_state["zip_ready"] = True
             st.session_state["zip_filename"] = zip_name
             st.session_state["zip_size"] = len(zip_bytes)
-
             st.rerun()
 
         except Exception as e:
             st.session_state["zip_ready"] = False
             st.session_state["zip_bytes"] = b""
-            st.error(
-                f"Nem sikerült a {fmt.upper()} export / ZIP készítés.\n\n"
-                f"Részletek: {e}"
-            )
+            st.error(f"Nem sikerült a {fmt.upper()} export / ZIP készítés.\n\nRészletek: {e}")
 
     if st.session_state.get("zip_ready") and st.session_state.get("zip_bytes"):
         size_mb = st.session_state.get("zip_size", len(st.session_state["zip_bytes"])) / (1024 * 1024)
@@ -350,7 +356,6 @@ def main():
             data=st.session_state["zip_bytes"],
             file_name=st.session_state.get("zip_filename", "diagramok.zip"),
             mime="application/zip",
-            key="zip_download_btn",
         )
 
 
