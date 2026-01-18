@@ -19,16 +19,7 @@ def safe_filename(s: str) -> str:
     return s or "nev_nelkul"
 
 
-def is_streamlit_cloud() -> bool:
-    # Streamlit Cloudon tipikusan be van állítva a HOSTNAME / STREAMLIT_*
-    # Nem 100% garantált, de jó közelítés.
-    import os
-    host = (os.environ.get("HOSTNAME") or "").lower()
-    return host.endswith("streamlit") or "streamlit" in host or os.environ.get("STREAMLIT_SHARING") is not None
-
-
 def build_color_map(period_order: List[str]) -> dict:
-    # Fix, exportban is stabil színek
     palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
     return {p: palette[i % len(palette)] for i, p in enumerate(period_order)}
 
@@ -98,43 +89,21 @@ def avg_view(long_df: pd.DataFrame, level: str) -> pd.DataFrame:
     return g
 
 
-def embed_footer_on_figure(fig, footer_text: str) -> None:
-    fig.add_annotation(
-        text=footer_text,
-        x=0.5,
-        y=-0.33,
-        xref="paper",
-        yref="paper",
-        showarrow=False,
-        xanchor="center",
-        yanchor="top",
-        font=dict(size=12),
-    )
-    fig.update_layout(margin=dict(b=180))
-
-
-def make_bar_figure(data, area_order, period_order, title: str, embed_footer: bool = False):
+def make_bar_figure(data, area_order, period_order, title: str):
     color_map = build_color_map(period_order)
-
     fig = px.bar(
         data,
         x="Terület",
         y="Százalék",
         color="Időszak",
         category_orders={"Terület": area_order, "Időszak": period_order},
-        color_discrete_map=color_map,     # <- FIX színek
+        color_discrete_map=color_map,
         barmode="group",
         range_y=[0, 110],
         labels={"Százalék": "Százalék (%)"},
         title=title,
     )
-
-    fig.update_traces(
-        texttemplate="%{y:.1f}%",
-        textposition="outside",
-        cliponaxis=False,
-    )
-
+    fig.update_traces(texttemplate="%{y:.1f}%", textposition="outside", cliponaxis=False)
     fig.update_layout(
         legend_title_text="Időszak",
         xaxis_title="Mérési terület",
@@ -143,23 +112,18 @@ def make_bar_figure(data, area_order, period_order, title: str, embed_footer: bo
         title_font_size=20,
         margin=dict(t=90, b=120),
     )
-
-    if embed_footer:
-        embed_footer_on_figure(fig, FOOTER_TEXT)
-
     return fig
 
 
-def make_radar_figure(data, area_order, period_order, title: str, embed_footer: bool = False):
+def make_radar_figure(data, area_order, period_order, title: str):
     color_map = build_color_map(period_order)
-
     fig = px.line_polar(
         data,
         r="Százalék",
         theta="Terület",
         color="Időszak",
         category_orders={"Terület": area_order, "Időszak": period_order},
-        color_discrete_map=color_map,     # <- FIX színek
+        color_discrete_map=color_map,
         line_close=True,
         range_r=[0, 100],
         labels={"Százalék": "Százalék (%)"},
@@ -170,19 +134,59 @@ def make_radar_figure(data, area_order, period_order, title: str, embed_footer: 
         title_font_size=20,
         margin=dict(t=90, b=120),
     )
-
-    if embed_footer:
-        embed_footer_on_figure(fig, FOOTER_TEXT)
-
     return fig
 
 
-def figures_to_zip(fig_items, fmt: str, width: int = 1400, height: int = 950, scale: int = 2) -> bytes:
+def wrap_html(title: str, footer: str, plotly_html_div: str) -> str:
+    # Teljes HTML oldal. Innen a böngészőből: Ctrl+P → Mentés PDF-be.
+    return f"""<!doctype html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 24px; }}
+    h1 {{ font-size: 20px; margin: 0 0 16px 0; }}
+    .footer {{ margin-top: 18px; font-size: 12px; color: #666; }}
+    @media print {{
+      body {{ margin: 10mm; }}
+      .footer {{ position: fixed; bottom: 8mm; left: 10mm; right: 10mm; }}
+    }}
+  </style>
+</head>
+<body>
+  <h1>{title}</h1>
+  {plotly_html_div}
+  <div class="footer">{footer}</div>
+</body>
+</html>
+"""
+
+
+def figures_to_zip_html(fig_items) -> bytes:
+    """
+    fig_items: [(filename.html, fig, title), ...]
+    Kaleido/Chrome nélkül működik: Plotly HTML export.
+    """
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for fname, fig in fig_items:
-            img_bytes = fig.to_image(format=fmt, width=width, height=height, scale=scale)
-            zf.writestr(fname, img_bytes)
+        for fname, fig, title in fig_items:
+            # include_plotlyjs='cdn' kisebb fájl, de internet kell a megnyitáshoz.
+            # Ha offline kell, állítsd 'include_plotlyjs=True'-re (nagyobb ZIP).
+            div = fig.to_html(full_html=False, include_plotlyjs="cdn")
+            html = wrap_html(title=title, footer=FOOTER_TEXT, plotly_html_div=div)
+            zf.writestr(fname, html.encode("utf-8"))
+
+        # kis README
+        zf.writestr(
+            "README.txt",
+            (
+                "Megnyitás: nyisd meg a HTML fájlokat böngészőben.\n"
+                "PDF: Ctrl+P (Nyomtatás) -> Mentés PDF-be.\n"
+                "Megjegyzés: ha nincs internet, és nem tölt be a grafikon, szólj, átállítom offline Plotly JS-re.\n"
+            ).encode("utf-8"),
+        )
     return buf.getvalue()
 
 
@@ -212,10 +216,8 @@ def main():
     left, _ = st.columns([1, 2])
     with left:
         view_mode = st.radio("Nézet", ["Egy tanuló", "Osztályátlag", "Összes átlag"], index=0)
-
         classes = sorted([c for c in long_all["Osztály"].dropna().unique().tolist()])
         selected_class = st.selectbox("Osztály szűrés", ["(mind)"] + classes, index=0)
-
         show_table = st.checkbox("Táblázat mutatása (%)", value=True)
 
     filtered = long_all.copy()
@@ -240,11 +242,11 @@ def main():
         chart_title = "Személyes és társas kompetencia : Átlag"
 
     st.subheader("Területenkénti összehasonlítás (%)")
-    st.plotly_chart(make_bar_figure(data, area_order, period_order, chart_title, embed_footer=False), use_container_width=True)
+    st.plotly_chart(make_bar_figure(data, area_order, period_order, chart_title), use_container_width=True)
     st.caption(FOOTER_TEXT)
 
     st.subheader("Radar diagram (%)")
-    st.plotly_chart(make_radar_figure(data, area_order, period_order, chart_title, embed_footer=False), use_container_width=True)
+    st.plotly_chart(make_radar_figure(data, area_order, period_order, chart_title), use_container_width=True)
     st.caption(FOOTER_TEXT)
 
     if show_table:
@@ -256,13 +258,10 @@ def main():
         )
         st.dataframe(pivot.style.format("{:.1f}%"), use_container_width=True)
 
-    # -------- ZIP --------
+    # -------- ZIP HTML --------
     st.divider()
-    st.subheader("Tömeges letöltés (ZIP)")
-
-    cloud = is_streamlit_cloud()
-    if cloud:
-        st.info("Online (Streamlit Cloud) környezet: a PNG export nem elérhető. Itt SVG exportot használj.")
+    st.subheader("Tömeges letöltés (ZIP) – HTML riportok")
+    st.write("Letöltés után nyisd meg a HTML fájlokat böngészőben. PDF-hez: Ctrl+P → Mentés PDF-be.")
 
     export_scope = st.radio(
         "Mit csomagoljunk a ZIP-be?",
@@ -271,25 +270,12 @@ def main():
         key="zip_scope",
     )
 
-    # Cloudon csak SVG
-    if cloud:
-        fmt = "svg"
-        st.write("Export formátum: **SVG**")
-    else:
-        export_format = st.radio(
-            "Export formátum",
-            ["SVG", "PNG"],
-            index=0,
-            key="zip_format",
-        )
-        fmt = "svg" if export_format == "SVG" else "png"
-
     if export_scope == "Minden tanuló (minden osztály)":
         export_df = long_all
-        zip_name = f"diagramok_minden_osztaly_{fmt}.zip"
+        zip_name = "diagramok_html_minden_osztaly.zip"
     else:
         export_df = filtered
-        zip_name = f"diagramok_szurt_{fmt}.zip"
+        zip_name = "diagramok_html_szurt.zip"
 
     st.session_state.setdefault("zip_ready", False)
     st.session_state.setdefault("zip_bytes", b"")
@@ -317,7 +303,7 @@ def main():
         status = st.empty()
 
         try:
-            fig_items = []
+            items = []
             for i, (nev, osztaly) in enumerate(export_names, start=1):
                 status.write(f"Feldolgozás: {osztaly} – {nev} ({i}/{total})")
                 one = export_df[(export_df["Név"] == nev) & (export_df["Osztály"] == osztaly)].copy()
@@ -326,17 +312,18 @@ def main():
                     continue
 
                 title = f"Személyes és társas kompetencia : {nev}"
-                bar = make_bar_figure(one, area_order, period_order, title, embed_footer=True)
-                radar = make_radar_figure(one, area_order, period_order, title, embed_footer=True)
+                bar = make_bar_figure(one, area_order, period_order, title)
+                radar = make_radar_figure(one, area_order, period_order, title)
 
                 base = f"{safe_filename(osztaly)}__{safe_filename(nev)}"
-                fig_items.append((f"{base}__oszlopdiagram.{fmt}", bar))
-                fig_items.append((f"{base}__radar.{fmt}", radar))
+                items.append((f"{base}__oszlopdiagram.html", bar, title))
+                items.append((f"{base}__radar.html", radar, title))
 
                 progress.progress(min(i / max(total, 1), 1.0))
 
-            status.write(f"Fájlok készítése és ZIP csomagolás ({fmt.upper()})…")
-            zip_bytes = figures_to_zip(fig_items, fmt=fmt)
+            status.write("HTML fájlok és ZIP csomagolás…")
+            zip_bytes = figures_to_zip_html(items)
+
             st.session_state["zip_bytes"] = zip_bytes
             st.session_state["zip_ready"] = True
             st.session_state["zip_filename"] = zip_name
@@ -346,15 +333,15 @@ def main():
         except Exception as e:
             st.session_state["zip_ready"] = False
             st.session_state["zip_bytes"] = b""
-            st.error(f"Nem sikerült a {fmt.upper()} export / ZIP készítés.\n\nRészletek: {e}")
+            st.error(f"Nem sikerült a ZIP készítés.\n\nRészletek: {e}")
 
     if st.session_state.get("zip_ready") and st.session_state.get("zip_bytes"):
         size_mb = st.session_state.get("zip_size", len(st.session_state["zip_bytes"])) / (1024 * 1024)
         st.success(f"ZIP elkészült! Méret: {size_mb:.2f} MB")
         st.download_button(
-            "Letöltés: diagramok ZIP",
+            "Letöltés: HTML riportok ZIP",
             data=st.session_state["zip_bytes"],
-            file_name=st.session_state.get("zip_filename", "diagramok.zip"),
+            file_name=st.session_state.get("zip_filename", "diagramok_html.zip"),
             mime="application/zip",
         )
 
